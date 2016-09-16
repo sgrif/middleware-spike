@@ -1,11 +1,12 @@
 extern crate futures;
 
-use futures::{Future, Async};
+use futures::{Future, Async, Poll};
 
 fn main() {
     let app = MyApp::new()
         .use_middleware(Head)
         .use_middleware(Gzip);
+
     Server::new().run(app);
 }
 
@@ -23,6 +24,17 @@ trait PrependMiddleware<Next> {
 
 // Placeholders for things that would actually exist
 struct HttpRequest;
+
+impl HttpRequest {
+    fn method(&self) -> &'static str {
+        unimplemented!();
+    }
+
+    fn path(&self) -> &str {
+        unimplemented!();
+    }
+}
+
 struct HttpResponse;
 struct Server;
 
@@ -37,6 +49,7 @@ impl Server {
 
 // This is a stand in for the user's application. The real type would be constructed by a web
 // framework or routing library.
+#[derive(Clone)]
 struct MyApp;
 
 impl MyApp {
@@ -55,7 +68,7 @@ trait Service {
     fn poll_ready(&self) -> Async<()>;
 }
 
-trait Middleware {
+trait Middleware: Clone {
     type Request;
     type Response;
     type Error;
@@ -71,7 +84,7 @@ trait Middleware {
         req
     }
 
-    fn after(resp: Self::Response) -> Self::Response {
+    fn after(&self, resp: Self::Response) -> Self::Response {
         resp
     }
 }
@@ -80,18 +93,49 @@ impl<T: Middleware> Service for T {
     type Request = T::Request;
     type Response = T::Response;
     type Error = T::Error;
-    type Future = futures::Map<
+    type Future = RunAfterMiddleware<
+        Self,
         <T::WrappedService as Service>::Future,
-        fn(Self::Response) -> Self::Response,
     >;
 
     fn call(&self, req: Self::Request) -> Self::Future {
-        self.wrapped_service().call(self.before(req))
-            .map(T::after)
+        RunAfterMiddleware::new(
+            self.clone(),
+            self.wrapped_service().call(self.before(req)),
+        )
     }
 
     fn poll_ready(&self) -> Async<()> {
         self.wrapped_service().poll_ready()
+    }
+}
+
+struct RunAfterMiddleware<T, U> {
+    middleware: T,
+    future_response: U,
+}
+
+impl<T, U> RunAfterMiddleware<T, U> {
+    fn new(middleware: T, future_response: U) -> Self {
+        RunAfterMiddleware {
+            middleware: middleware,
+            future_response: future_response,
+        }
+    }
+}
+
+impl<T, U> Future for RunAfterMiddleware<T, U> where
+    T: Middleware,
+    U: Future<Item=T::Response>,
+{
+    type Item = U::Item;
+    type Error = U::Error;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        match self.future_response.poll() {
+            Ok(Async::Ready(response)) => self.middleware.after(response),
+            err_or_not_ready => err_or_not_ready,
+        }
     }
 }
 
@@ -128,6 +172,7 @@ impl<T> PrependMiddleware<T> for Head {
     }
 }
 
+#[derive(Clone)]
 struct HeadMiddleware<T>(T);
 
 impl<T, U: AppendMiddleware<T>> AppendMiddleware<T> for HeadMiddleware<U> {
@@ -138,7 +183,7 @@ impl<T, U: AppendMiddleware<T>> AppendMiddleware<T> for HeadMiddleware<U> {
     }
 }
 
-impl<T: Service<Response=HttpResponse>> Middleware for HeadMiddleware<T> {
+impl<T: Service<Response=HttpResponse> + Clone> Middleware for HeadMiddleware<T> {
     type Request = T::Request;
     type Response = HttpResponse;
     type Error = T::Error;
@@ -148,7 +193,7 @@ impl<T: Service<Response=HttpResponse>> Middleware for HeadMiddleware<T> {
         &self.0
     }
 
-    fn after(resp: Self::Response) -> Self::Response {
+    fn after(&self, resp: Self::Response) -> Self::Response {
         // resp.body = stream::empty();
         resp
     }
@@ -164,6 +209,7 @@ impl<T> PrependMiddleware<T> for Gzip {
     }
 }
 
+#[derive(Clone)]
 struct GzipMiddleware<T>(T);
 
 impl<T, U: AppendMiddleware<T>> AppendMiddleware<T> for GzipMiddleware<U> {
@@ -174,7 +220,7 @@ impl<T, U: AppendMiddleware<T>> AppendMiddleware<T> for GzipMiddleware<U> {
     }
 }
 
-impl<T: Service<Response=HttpResponse>> Middleware for GzipMiddleware<T> {
+impl<T: Service<Response=HttpResponse> + Clone> Middleware for GzipMiddleware<T> {
     type Request = T::Request;
     type Response = HttpResponse;
     type Error = T::Error;
@@ -184,7 +230,7 @@ impl<T: Service<Response=HttpResponse>> Middleware for GzipMiddleware<T> {
         &self.0
     }
 
-    fn after(resp: Self::Response) -> Self::Response {
+    fn after(&self, resp: Self::Response) -> Self::Response {
         resp
     }
 }
