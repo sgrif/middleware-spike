@@ -1,0 +1,7 @@
+[package]
+name = "rack"
+version = "0.1.0"
+authors = ["Sean Griffin <sean@seantheprogrammer.com>"]
+
+[dependencies]
+futures = "0.1"
